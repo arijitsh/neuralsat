@@ -24,6 +24,11 @@
 ## INSTALLATION & USAGE
 - see [INSTALL.md](./doc/INSTALL.md)
 
+## DIVERSITY SAMPLING 
+This version extends NeuralSAT to generate multiple, distinct counterexamples for violated properties natively using a stochastic DPLL branch-and-bound search. 
+- Enable it via `Settings.use_diversity_sampling = True` and set the desired witness count `Settings.diversity_k = k`.
+- For evaluation scripts and metric calculations, see the [VNN-COMP Scripts README](./vnncomp_scripts/README.md).
+
 ## FEATURES
 
 - **fully automatic**, **ease of use** and requires **no tuning** (i.e., no expert knowledge required)
