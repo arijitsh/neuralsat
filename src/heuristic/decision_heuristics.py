@@ -32,6 +32,19 @@ class DecisionHeuristic:
     @beartype
     @torch.no_grad()
     def __call__(self: 'DecisionHeuristic', abstractor: 'abstractor.abstractor.NetworkAbstractor', domain_params: AbstractResults) -> torch.Tensor | list[list]:
+        # --- NeuralSAT-Div: stochastic DPLL (HighDiv §4) ---
+        # With probability diversity_stochastic_prob, randomly select a neuron
+        # and assign it a random phase. This is the direct analog of HighDiv's
+        # stochastic CDCL(T) which randomizes VSIDS branching and phase saving
+        # to steer the solver away from previously found activation regions.
+        if (
+            getattr(Settings, 'use_diversity_sampling', False)
+            and random.random() < getattr(Settings, 'diversity_stochastic_prob', 0.0)
+            and not self.input_split
+            and None not in abstractor.split_points
+        ):
+            return self._random_hidden_branching(domain_params, abstractor)
+
         if self.input_split:
             if (self.decision_method == 'smart') and (domain_params.lAs is not None):
                 return self.smart_input_branching(
@@ -75,6 +88,45 @@ class DecisionHeuristic:
             domain_params=domain_params,
         )
 
+
+    @beartype
+    @torch.no_grad()
+    def _random_hidden_branching(
+        self: 'DecisionHeuristic',
+        domain_params: AbstractResults,
+        abstractor,
+    ) -> list[list]:
+        """
+        Fully random neuron + phase selection.
+        Mirrors HighDiv's stochastic CDCL(T): at each decision point,
+        randomly pick an undecided variable and assign it a random phase.
+        This prevents NeuralSAT from always following the same FSB greedy
+        path and thus finding only nearby activation regions.
+        """
+        batch = len(domain_params.input_lowers)
+        decisions = []
+        for b in range(batch):
+            # Collect unstable neurons across all split layers
+            candidates = []
+            for layer in abstractor.net.split_nodes:
+                lb = domain_params.lower_bounds[layer.name][b].flatten()
+                ub = domain_params.upper_bounds[layer.name][b].flatten()
+                unstable_mask = (lb < 0) & (ub > 0)
+                unstable_ids = unstable_mask.nonzero(as_tuple=False).squeeze(1)
+                for nid in unstable_ids.tolist():
+                    candidates.append((layer.name, nid, 0))  # split point 0 for ReLU
+
+            if candidates:
+                # Random neuron
+                chosen = random.choice(candidates)
+            else:
+                # Fallback: pick the first layer, first neuron
+                layer = abstractor.net.split_nodes[0]
+                chosen = (layer.name, 0, 0)
+
+            decisions.append(list(chosen))
+
+        return decisions
 
     @beartype
     def get_topk_scores(self: 'DecisionHeuristic', abstractor: 'abstractor.abstractor.NetworkAbstractor', domain_params: AbstractResults, 

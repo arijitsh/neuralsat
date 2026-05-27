@@ -588,31 +588,86 @@ def _check_full_assignment(self: verifier.verifier.Verifier, domain_params: Abst
     
     for idx_ in pruning_indices:
         self.abstractor.build_lp_solver(
-            model_type='lp', 
-            input_lower=domain_params.input_lowers[idx_][None], 
-            input_upper=domain_params.input_uppers[idx_][None], 
+            model_type='lp',
+            input_lower=domain_params.input_lowers[idx_][None],
+            input_upper=domain_params.input_uppers[idx_][None],
             c=domain_params.cs[idx_][None],
             refine=False,
         )
 
         feasible, adv = self.abstractor.solve_full_assignment(
-            input_lower=domain_params.input_lowers[idx_], 
-            input_upper=domain_params.input_uppers[idx_], 
+            input_lower=domain_params.input_lowers[idx_],
+            input_upper=domain_params.input_uppers[idx_],
             lower_bounds={k: v[idx_] for k, v in domain_params.lower_bounds.items()},
             upper_bounds={k: v[idx_] for k, v in domain_params.upper_bounds.items()},
             c=domain_params.cs[idx_],
-            rhs=domain_params.rhs[idx_]
+            rhs=domain_params.rhs[idx_],
         )
-        
+
         if feasible:
+            # --- NeuralSAT-Div: PAIS (HighDiv Phase 2 / CCSS analog) ---
+            # Run the polytope-aware input sampler on the Gurobi LP model
+            # that was just built for this activation region.  This
+            # generates additional diverse witnesses *within the same
+            # activation polytope P(sigma)* using boundary-aware moves,
+            # exactly as HighDiv's CCSS samples from the LIA feasible
+            # region guided by the CDCL(T) solution.
+            if (
+                getattr(Settings, 'use_diversity_sampling', False)
+                and hasattr(self.abstractor.net, 'solver_model')
+                and self.abstractor.net.solver_model is not None
+            ):
+                from attacker.pais import PolytopeAwareInputSampler
+                pais = PolytopeAwareInputSampler(
+                    lp_model=self.abstractor.net.solver_model,
+                    seed_adv=adv,
+                    input_shape=self.input_shape,
+                    input_lower=domain_params.input_lowers[idx_],
+                    input_upper=domain_params.input_uppers[idx_],
+                    n_samples=getattr(Settings, 'diversity_bam_n', 5),
+                )
+                extra_samples = pais.sample()
+                if hasattr(self, 'violation_samples'):
+                    for xs in extra_samples:
+                        if len(self.violation_samples) < Settings.diversity_k:
+                            self.violation_samples.append(xs.cpu())
+
+                # --- Bidirectional guidance: block this activation region ---
+                # Add this domain's history as a conflict clause so the DPLL
+                # will explore a different linear region next iteration.
+                # This is HighDiv's fix_partial_assignment(F, M_ls):
+                # the PAIS solution's activation pattern fixes a sub-formula
+                # that the next CDCL(T) run must avoid.
+                obj_id = int(domain_params.objective_ids[idx_])
+                if obj_id in self.domains_list.all_conflict_clauses:
+                    self.domains_list.all_conflict_clauses[obj_id].append(
+                        domain_params.histories[idx_]
+                    )
+
+                # If budget reached, surface immediately
+                if (
+                    hasattr(self, 'violation_samples')
+                    and len(self.violation_samples) >= Settings.diversity_k
+                ):
+                    return adv, None
+                # Continue search for more diverse witnesses
+                # (do NOT return SAT yet — keep the loop going)
+                adv = None   # suppress the immediate SAT return
+                continue     # next pruning_index
+
             return adv, None
-        
-    # save pruned domains
-    [self.domains_list.all_conflict_clauses[int(domain_params.objective_ids[i])].append(domain_params.histories[i]) for i in pruning_indices]
-    
+
+    # save pruned domains (UNSAT)
+    [
+        self.domains_list.all_conflict_clauses[
+            int(domain_params.objective_ids[i])
+        ].append(domain_params.histories[i])
+        for i in pruning_indices
+    ]
+
     # unverified indices
     remaining_indices = torch.where(n_unstables > 0)[0]
-    
+
     return None, remaining_indices
 
         

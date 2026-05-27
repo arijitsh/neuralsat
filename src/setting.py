@@ -47,6 +47,13 @@ class GlobalSettings(BaseSettings):
         self.skip_initial_worst_bound = -1e6
         self.max_domains = 1e9
         
+        # --- NeuralSAT-Div: HighDiv-style diverse sampling ---
+        self.use_diversity_sampling = False   # activate sampling mode
+        self.diversity_k = 10                 # target number of violation witnesses
+        self.diversity_bam_n = 5             # PAIS: polytope samples per activation region
+        self.diversity_stochastic_prob = 0.3 # probability of random neuron + phase (stochastic DPLL)
+        self.diversity_blocking_topk = None  # None = block full pattern; int = block only top-k neurons
+        
         # decomposition
         self.use_decompose = False
         

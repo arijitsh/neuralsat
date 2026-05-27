@@ -28,6 +28,7 @@ from helper.misc.result import ReturnStatus
 from helper.misc.logger import logger
 
 from setting import Settings
+from attacker.pais import PolytopeAwareInputSampler
 
 
 class Verifier:
@@ -77,6 +78,42 @@ class Verifier:
             force_split=force_split,
         )
         return self.status
+
+    @beartype
+    def sample_violations(
+        self: 'Verifier',
+        dnf_objectives: 'DnfObjectives',
+        k: int = 10,
+        timeout: int | float = 3600.0,
+        force_split: str | None = None,
+    ) -> list:
+        """
+        HighDiv-style: collect k diverse violation witnesses.
+        Returns list[torch.Tensor] of counterexample inputs.
+
+        Bidirectional guidance loop (mirrors HighDiv Algorithm 1):
+          Phase 1 – Stochastic NeuralDPLL(T): find an activation region and witness x*
+          Phase 2 – PAIS (CCSS analog): sample diverse inputs inside polytope P(sigma)
+          Blocking: add x*'s activation pattern as conflict clause so DPLL
+                    explores a new region next iteration
+        """
+        Settings.use_diversity_sampling = True
+        Settings.diversity_k = k
+        self.violation_samples: list = []
+        self.start_time = time.time()
+        self.total_time = timeout
+
+        # Outer HighDiv loop — keep going until k samples or timeout
+        dnf_copy = copy.deepcopy(dnf_objectives)
+        self._verify(
+            dnf_objectives=dnf_copy,
+            preconditions=[],
+            timeout=timeout,
+            force_split=force_split,
+        )
+
+        Settings.use_diversity_sampling = False
+        return self.violation_samples
     
     
     @beartype
@@ -305,6 +342,22 @@ class Verifier:
             # check adv founded
             if self.adv is not None:
                 if self._check_adv(self.adv, objective):
+                    if getattr(Settings, 'use_diversity_sampling', False):
+                        # --- HighDiv Phase 1 result: collect witness ---
+                        self.violation_samples.append(self.adv.clone().cpu())
+                        logger.info(
+                            f'[Diversity] Collected sample '
+                            f'{len(self.violation_samples)}/{Settings.diversity_k}'
+                        )
+                        if len(self.violation_samples) >= Settings.diversity_k:
+                            return ReturnStatus.SAT  # budget exhausted
+                        # --- Bidirectional guidance: block this activation region ---
+                        # Adds the current domain's activation history as a conflict
+                        # clause so the DPLL won't revisit this linear region.
+                        # Mirrors HighDiv's fix_partial_assignment(F, M_ls).
+                        self._block_sat_activation_region(objective)
+                        self.adv = None
+                        continue  # keep searching for diverse witnesses
                     return ReturnStatus.SAT
                 logger.debug("[!] Invalid counter-example")
                 # FIXME
@@ -514,6 +567,62 @@ class Verifier:
         
     
     
+    def _block_sat_activation_region(self: 'Verifier', objective) -> None:
+        """
+        Block the activation region of the last found SAT witness.
+
+        Adds the activation history of the best (shallowest) domain as a
+        conflict clause, exactly like NeuralSAT does for UNSAT domains.
+        This forces the DPLL to branch into a different linear region on the
+        next iteration — the same mechanism HighDiv uses when it adds local-
+        search solutions as under-approximation constraints for the next
+        CDCL(T) run.
+
+        If Settings.diversity_blocking_topk is set, only the top-k most
+        recently decided neurons are blocked (partial blocking), which is
+        analogous to HighDiv's fix_partial_assignment fixing only a subset
+        of variables.
+        """
+        if not hasattr(self, 'domains_list') or self.domains_list is None:
+            return
+        if self.input_split:
+            return  # activation pattern blocking only applies to hidden split
+
+        # Pick the domain whose activation history produced the adv.
+        # NeuralSAT stores histories in domains_list.all_histories.
+        # We grab the first one (worst bound = most likely SAT region).
+        if (
+            not hasattr(self.domains_list, 'all_histories')
+            or self.domains_list.all_histories is None
+            or len(self.domains_list.all_histories) == 0
+        ):
+            return
+
+        # Use the last-visited history (just processed in _parallel_dpll)
+        history = copy.deepcopy(self.domains_list.all_histories[0])
+
+        topk = getattr(Settings, 'diversity_blocking_topk', None)
+        if topk is not None:
+            # Partial blocking: keep only the topk most recently split neurons.
+            # Each history entry: layer_name -> (locs, signs, betas).
+            # Flatten, take last topk, rebuild.
+            all_entries = []
+            for lname, (locs, signs, betas) in history.items():
+                for i in range(len(locs)):
+                    all_entries.append((lname, locs[i], signs[i], betas[i]))
+            all_entries = all_entries[-topk:]  # most recently decided
+            # Rebuild trimmed history
+            history = {lname: ([], [], []) for lname in history}
+            for lname, loc, sign, beta in all_entries:
+                history[lname][0].append(loc)
+                history[lname][1].append(sign)
+                history[lname][2].append(beta)
+
+        # Add as conflict clause for all objective ids in the current objective.
+        for obj_id in [int(oid) for oid in objective.ids]:
+            if obj_id in self.domains_list.all_conflict_clauses:
+                self.domains_list.all_conflict_clauses[obj_id].append(history)
+
     from .utils import (
         _preprocess, 
         _init_abstractor,
