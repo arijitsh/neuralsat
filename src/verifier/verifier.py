@@ -120,25 +120,52 @@ class Verifier:
     def _verify(self: 'Verifier', dnf_objectives: 'DnfObjectives', preconditions: list, timeout: int | float = 3600.0, force_split: str | None = None) -> str:
         if not len(dnf_objectives):
             return ReturnStatus.UNSAT
-        
+
         # attack
-        is_attacked, self.adv = self._pre_attack(copy.deepcopy(dnf_objectives), timeout=min(10.0, timeout * 0.1))
-        if is_attacked:
-            return ReturnStatus.SAT  
+        if getattr(Settings, 'use_diversity_sampling', False):
+            # --- Diversity: run multi-seed pre-attack loop ---
+            atk_start = time.time()
+            atk_timeout = min(20.0, timeout * 0.5)
+            logger.info(f'[Diversity] Starting multi-seed pre-attack for {atk_timeout:.1f}s')
+            while len(self.violation_samples) < Settings.diversity_k:
+                rem_t = atk_timeout - (time.time() - atk_start)
+                if rem_t <= 0:
+                    break
+                is_attacked, adv = self._pre_attack(copy.deepcopy(dnf_objectives), timeout=min(2.0, rem_t))
+                if is_attacked:
+                    self.violation_samples.append(adv.clone().cpu())
+                    logger.info(f'[Diversity] Pre-attack sample {len(self.violation_samples)}/{Settings.diversity_k}')
+                else:
+                    break # if attack fails, DPLL is needed
+            
+            if len(self.violation_samples) >= Settings.diversity_k:
+                return ReturnStatus.SAT
+            self.adv = None
+        else:
+            is_attacked, self.adv = self._pre_attack(copy.deepcopy(dnf_objectives), timeout=min(10.0, timeout * 0.1))
+            if is_attacked:
+                return ReturnStatus.SAT
 
         # refine
         dnf_objectives, reference_bounds = self._preprocess(dnf_objectives, force_split=force_split)
-        
+
         if os.environ.get('NEURALSAT_DEBUG'):
             print(f'[+] verify _preprocess:', get_used_gpu_memory(), 'MB')
-            
+
         if not len(dnf_objectives):
             return ReturnStatus.UNSAT
-        
+
         # mip attack
         is_attacked, self.adv = self._mip_attack(reference_bounds)
         if is_attacked:
-            return ReturnStatus.SAT 
+            if getattr(Settings, 'use_diversity_sampling', False):
+                self.violation_samples.append(self.adv.clone().cpu())
+                logger.info(f'[Diversity] MIP-attack sample {len(self.violation_samples)}/{Settings.diversity_k}')
+                if len(self.violation_samples) >= Settings.diversity_k:
+                    return ReturnStatus.SAT
+                self.adv = None
+            else:
+                return ReturnStatus.SAT
         
         if self._check_invoke_mip_presolving():
             print('[+] Invoking MIP presolving')
@@ -351,13 +378,21 @@ class Verifier:
                         )
                         if len(self.violation_samples) >= Settings.diversity_k:
                             return ReturnStatus.SAT  # budget exhausted
-                        # --- Bidirectional guidance: block this activation region ---
-                        # Adds the current domain's activation history as a conflict
-                        # clause so the DPLL won't revisit this linear region.
-                        # Mirrors HighDiv's fix_partial_assignment(F, M_ls).
-                        self._block_sat_activation_region(objective)
+                        # Extract learned conflict clauses from the current tree before clearing it
+                        if not self.input_split:
+                            for k, v in self._get_learned_conflict_clauses().items():
+                                preconditions[k].extend(v)
+                                
+                        # Re-initialize the root domain! This implicitly clears the tree,
+                        # effectively doing a DPLL restart but preserving the abstractor and learned clauses.
+                        # It also clears heuristic branching scores tracked per-domain.
+                        self.domains_list = self._initialize(
+                            objective=objective, 
+                            preconditions=preconditions, 
+                            reference_bounds=reference_bounds
+                        )
                         self.adv = None
-                        continue  # keep searching for diverse witnesses
+                        continue
                     return ReturnStatus.SAT
                 logger.debug("[!] Invalid counter-example")
                 # FIXME
