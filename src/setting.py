@@ -50,6 +50,8 @@ class GlobalSettings(BaseSettings):
         # --- NeuralSAT-Div: HighDiv-style diverse sampling ---
         self.use_diversity_sampling = False   # activate sampling mode
         self.diversity_k = 10                 # target number of violation witnesses
+        self.sampling_engine = 'auto'         # 'random' | 'highdiv' | 'auto'
+        self.diversity_threshold = 0.05       # 'auto': normalized mean pairwise L2 below which we fall back to highdiv
         self.diversity_bam_n = 5             # PAIS: polytope samples per activation region
         self.diversity_stochastic_prob = 0.3 # probability of random neuron + phase (stochastic DPLL)
         self.diversity_blocking_topk = None  # None = block full pattern; int = block only top-k neurons

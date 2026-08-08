@@ -52,6 +52,47 @@ def get_used_gpu_memory(return_percentage: bool = False):
     
 
 
+def normalized_diversity(samples: list, lb: torch.Tensor | None = None, ub: torch.Tensor | None = None) -> float:
+    """
+    Mean pairwise L2 distance between samples, normalized by the input-box
+    diameter so the score is comparable across instances (0 = identical,
+    1 = spread over the whole box). Returns 0.0 for fewer than 2 samples.
+    """
+    if len(samples) < 2:
+        return 0.0
+
+    flat = torch.stack([s.cpu().flatten().float() for s in samples])
+    dists = torch.cdist(flat, flat)
+    mean_pw = dists.sum().item() / (len(flat) * (len(flat) - 1))
+
+    if lb is None or ub is None:
+        return mean_pw
+
+    diameter = max((ub.cpu().flatten() - lb.cpu().flatten()).norm().item(), 1e-9)
+    return mean_pw / diameter
+
+
+def farthest_point_padding(samples: list, pool: list, k: int) -> list:
+    """
+    Greedily extend `samples` with the entries of `pool` that are farthest from
+    what has already been selected (max-min criterion), up to `k` in total.
+    Used when the `auto` engine falls back to HighDiv and DPLL returns fewer
+    than `k` witnesses: the leftover random witnesses top up the result without
+    collapsing its diversity.
+    """
+    selected = list(samples)
+    remaining = list(pool)
+    while len(selected) < k and remaining:
+        if not selected:
+            selected.append(remaining.pop(0))
+            continue
+        sel = torch.stack([s.cpu().flatten().float() for s in selected])
+        rem = torch.stack([s.cpu().flatten().float() for s in remaining])
+        best = int(torch.cdist(rem, sel).min(dim=1).values.argmax())
+        selected.append(remaining.pop(best))
+    return selected
+
+
 def _check_invoke_mip_presolving(self):
     if not Settings.use_mip_verify:
         return False

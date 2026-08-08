@@ -13,7 +13,8 @@ from helper.misc.logger import logger, LOGGER_LEVEL
 from helper.misc.export import get_adv_string
 from helper.misc.result import ReturnStatus
 
-from verifier.verifier import Verifier 
+from verifier.verifier import Verifier
+from verifier.utils import normalized_diversity
 
 from setting import Settings
 
@@ -59,7 +60,23 @@ if __name__ == '__main__':
                         help="test on small example with special settings.")
     parser.add_argument('--export_runtime', action='store_true', required=False,
                         help="output runtime.")
-    
+    parser.add_argument('-s', '--num_samples', type=int, default=None,
+                        help="enable diversity sampling: collect this many distinct counter-examples instead of a single verification answer.")
+    parser.add_argument('--sampling-engine', '--sampling_engine', dest='sampling_engine',
+                        type=str, choices=['highdiv', 'random', 'auto'], default='auto',
+                        help="sampling strategy: 'random' (multi-seed attack only), 'highdiv' (stochastic DPLL only), "
+                             "or 'auto' (try random, fall back to highdiv if the samples are not diverse enough).")
+    parser.add_argument('--diversity_threshold', type=float, default=None,
+                        help="'auto' engine: normalized mean pairwise distance below which the random samples are rejected (default: 0.05).")
+    parser.add_argument('--sample_output', type=str, required=False,
+                        help="file to save sampled counter-examples to (.npy).")
+    parser.add_argument('--diversity_prob', type=float, default=None,
+                        help="probability of random neuron/phase selection in stochastic DPLL (default: 0.3).")
+    parser.add_argument('--diversity_bam_n', type=int, default=None,
+                        help="number of PAIS polytope samples per activation region (default: 5).")
+    parser.add_argument('--diversity_blocking_topk', type=int, default=None,
+                        help="block only the top-k most constrained neurons instead of the full activation pattern.")
+
     args = parser.parse_args()   
     Settings.setup(args)
     print(Settings)
@@ -106,11 +123,49 @@ if __name__ == '__main__':
     )
     
     
+    # sample
+    if args.num_samples is not None:
+        Settings.sampling_engine = args.sampling_engine
+        if args.diversity_threshold is not None:
+            Settings.diversity_threshold = args.diversity_threshold
+        if args.diversity_prob is not None:
+            Settings.diversity_stochastic_prob = args.diversity_prob
+        if args.diversity_bam_n is not None:
+            Settings.diversity_bam_n = args.diversity_bam_n
+        if args.diversity_blocking_topk is not None:
+            Settings.diversity_blocking_topk = args.diversity_blocking_topk
+
+        timeout = args.timeout - (time.time() - START_TIME)
+        samples = verifier.sample_violations(
+            dnf_objectives=objectives,
+            k=args.num_samples,
+            timeout=timeout,
+            force_split=args.force_split,
+        )
+        runtime = time.time() - START_TIME
+
+        score = normalized_diversity(samples, verifier.sampling_lower, verifier.sampling_upper)
+        logger.info(f'[!] Collected {len(samples)}/{args.num_samples} samples in {runtime:.04f}s')
+        logger.info(f'[!] Diversity (normalized mean pairwise L2): {score:.04f}')
+        for idx, sample in enumerate(samples):
+            flat = sample.flatten().detach().cpu()
+            output = verifier.net(sample.to(args.device)).flatten().detach().cpu()
+            print(f'sample {idx}: input={flat.tolist()}')
+            print(f'sample {idx}: output={output.tolist()}')
+
+        if args.sample_output:
+            import numpy as np
+            np.save(args.sample_output, torch.stack([s.cpu() for s in samples]).numpy() if samples else np.empty(0))
+            print(f'[!] Saved {len(samples)} samples to {args.sample_output}')
+
+        print(f'{len(samples)},{runtime:.04f}')
+        exit(0)
+
     # verify
     timeout = args.timeout - (time.time() - START_TIME)
     status = verifier.verify(objectives, timeout=timeout, force_split=args.force_split)
     runtime = time.time() - START_TIME
-    
+
     # output
     logger.info(f'[!] Iterations: {verifier.iteration}')
     if verifier.adv is not None:

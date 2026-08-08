@@ -14,7 +14,7 @@ import os
 from heuristic.restart_heuristics import HIDDEN_SPLIT_RESTART_STRATEGIES, INPUT_SPLIT_RESTART_STRATEGIES
 from heuristic.domains_list import DomainsList
 
-from verifier.utils import _prune_domains, get_used_gpu_memory
+from verifier.utils import _prune_domains, get_used_gpu_memory, normalized_diversity, farthest_point_padding
 from verifier.mip_solver import MIPSolver
 
 from abstractor.auto_LiRPA.utils import stop_criterion_batch_any
@@ -86,6 +86,7 @@ class Verifier:
         k: int = 10,
         timeout: int | float = 3600.0,
         force_split: str | None = None,
+        engine: str | None = None,
     ) -> list:
         """
         HighDiv-style: collect k diverse violation witnesses.
@@ -96,12 +97,27 @@ class Verifier:
           Phase 2 – PAIS (CCSS analog): sample diverse inputs inside polytope P(sigma)
           Blocking: add x*'s activation pattern as conflict clause so DPLL
                     explores a new region next iteration
+
+        `engine` selects how the witnesses are produced and overrides
+        Settings.sampling_engine when given:
+          'random'  – multi-seed pre-attack only, no DPLL search
+          'highdiv' – skip the pre-attack, go straight to the loop above
+          'auto'    – run 'random' first and keep its result only if it yields k
+                      witnesses whose normalized mean pairwise distance clears
+                      Settings.diversity_threshold; otherwise fall back to 'highdiv'
         """
+        if engine is not None:
+            Settings.sampling_engine = engine
         Settings.use_diversity_sampling = True
         Settings.diversity_k = k
         self.violation_samples: list = []
+        self.random_samples: list = []  # 'auto': witnesses kept from the discarded random phase
         self.start_time = time.time()
         self.total_time = timeout
+
+        # input box, used to normalize the diversity score
+        self.sampling_lower = dnf_objectives.lower_bounds[0] if len(dnf_objectives) else None
+        self.sampling_upper = dnf_objectives.upper_bounds[0] if len(dnf_objectives) else None
 
         # Outer HighDiv loop — keep going until k samples or timeout
         dnf_copy = copy.deepcopy(dnf_objectives)
@@ -111,6 +127,13 @@ class Verifier:
             timeout=timeout,
             force_split=force_split,
         )
+
+        # 'auto' fell back to HighDiv but DPLL did not fill the budget: top up
+        # from the random witnesses it set aside rather than returning fewer.
+        if len(self.violation_samples) < k and self.random_samples:
+            before = len(self.violation_samples)
+            self.violation_samples = farthest_point_padding(self.violation_samples, self.random_samples, k)
+            logger.info(f'[Diversity] Padded {before} -> {len(self.violation_samples)} samples from the random phase')
 
         Settings.use_diversity_sampling = False
         return self.violation_samples
@@ -123,23 +146,50 @@ class Verifier:
 
         # attack
         if getattr(Settings, 'use_diversity_sampling', False):
-            # --- Diversity: run multi-seed pre-attack loop ---
-            atk_start = time.time()
-            atk_timeout = min(20.0, timeout * 0.5)
-            logger.info(f'[Diversity] Starting multi-seed pre-attack for {atk_timeout:.1f}s')
-            while len(self.violation_samples) < Settings.diversity_k:
-                rem_t = atk_timeout - (time.time() - atk_start)
-                if rem_t <= 0:
-                    break
-                is_attacked, adv = self._pre_attack(copy.deepcopy(dnf_objectives), timeout=min(2.0, rem_t))
-                if is_attacked:
-                    self.violation_samples.append(adv.clone().cpu())
-                    logger.info(f'[Diversity] Pre-attack sample {len(self.violation_samples)}/{Settings.diversity_k}')
-                else:
-                    break # if attack fails, DPLL is needed
-            
-            if len(self.violation_samples) >= Settings.diversity_k:
-                return ReturnStatus.SAT
+            engine = getattr(Settings, 'sampling_engine', 'auto')
+            assert engine in ('random', 'highdiv', 'auto'), f'Unknown sampling engine: {engine=}'
+
+            if engine in ('random', 'auto'):
+                # --- Diversity: run multi-seed pre-attack loop ---
+                atk_start = time.time()
+                atk_timeout = min(20.0, timeout * 0.5)
+                logger.info(f'[Diversity] Starting multi-seed pre-attack for {atk_timeout:.1f}s ({engine=})')
+                while len(self.violation_samples) < Settings.diversity_k:
+                    rem_t = atk_timeout - (time.time() - atk_start)
+                    if rem_t <= 0:
+                        break
+                    is_attacked, adv = self._pre_attack(copy.deepcopy(dnf_objectives), timeout=min(2.0, rem_t))
+                    if is_attacked:
+                        self.violation_samples.append(adv.clone().cpu())
+                        logger.info(f'[Diversity] Pre-attack sample {len(self.violation_samples)}/{Settings.diversity_k}')
+                    else:
+                        break # if attack fails, DPLL is needed
+
+                if engine == 'random':
+                    # no fallback: return whatever the random phase produced
+                    return ReturnStatus.SAT if len(self.violation_samples) else ReturnStatus.UNKNOWN
+
+                # 'auto': accept the random witnesses only if they are both enough and spread out
+                score = normalized_diversity(
+                    self.violation_samples,
+                    getattr(self, 'sampling_lower', None),
+                    getattr(self, 'sampling_upper', None),
+                )
+                threshold = Settings.diversity_threshold
+                if len(self.violation_samples) >= Settings.diversity_k and score >= threshold:
+                    logger.info(f'[Diversity] Random engine accepted ({score=:.04f} >= {threshold=})')
+                    return ReturnStatus.SAT
+
+                reason = 'too few samples' if len(self.violation_samples) < Settings.diversity_k else 'not diverse enough'
+                logger.info(
+                    f'[Diversity] Random engine rejected ({reason}: '
+                    f'{len(self.violation_samples)}/{Settings.diversity_k} samples, {score=:.04f}, {threshold=})'
+                    f' -- falling back to highdiv'
+                )
+                # set the witnesses aside: DPLL restarts from an empty set so that
+                # activation-pattern blocking is driven by its own witnesses only
+                self.random_samples = self.violation_samples
+                self.violation_samples = []
             self.adv = None
         else:
             is_attacked, self.adv = self._pre_attack(copy.deepcopy(dnf_objectives), timeout=min(10.0, timeout * 0.1))
