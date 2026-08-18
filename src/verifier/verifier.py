@@ -146,50 +146,96 @@ class Verifier:
 
         # attack
         if getattr(Settings, 'use_diversity_sampling', False):
+            self.random_inputs_tested = 0
+            self.random_inputs_failed = 0
             engine = getattr(Settings, 'sampling_engine', 'auto')
             assert engine in ('random', 'highdiv', 'auto'), f'Unknown sampling engine: {engine=}'
 
             if engine in ('random', 'auto'):
-                # --- Diversity: run multi-seed pre-attack loop ---
-                atk_start = time.time()
-                atk_timeout = min(20.0, timeout * 0.5)
-                logger.info(f'[Diversity] Starting multi-seed pre-attack for {atk_timeout:.1f}s ({engine=})')
+                # Assess random search in 20-second windows. Auto mode keeps
+                # searching randomly only if both its acceptance rate and its
+                # normalized input diversity are adequate.
+                random_start = time.time()
+                window_start = random_start
+                last_progress = random_start
+                logger.info(f'[Diversity] Starting multi-seed pre-attack ({engine=})')
                 while len(self.violation_samples) < Settings.diversity_k:
-                    rem_t = atk_timeout - (time.time() - atk_start)
-                    if rem_t <= 0:
+                    total_remaining = self.total_time - (time.time() - self.start_time)
+                    if total_remaining <= 0:
                         break
-                    is_attacked, adv = self._pre_attack(copy.deepcopy(dnf_objectives), timeout=min(2.0, rem_t))
+                    remaining = min(window_start + 20.0 - time.time(), total_remaining)
+                    if remaining <= 0:
+                        score = normalized_diversity(
+                            self.violation_samples,
+                            getattr(self, 'sampling_lower', None),
+                            getattr(self, 'sampling_upper', None),
+                        )
+                        acceptance = len(self.violation_samples) / max(self.random_inputs_tested, 1)
+                        continue_random = acceptance >= 0.10 and score >= Settings.diversity_threshold
+                        if getattr(Settings, 'quiet_sampler', False):
+                            if continue_random:
+                                decision = 'continuing random search'
+                            else:
+                                decision = 'switching to HighDiv' if engine == 'auto' else 'stopping random search'
+                            print(
+                                f'c Random mode check after {time.time() - random_start:.1f}s: '
+                                f'{len(self.violation_samples)} samples, acceptance {acceptance:.1%}, '
+                                f'diversity {score:.4f}; {decision}'
+                            )
+                        if continue_random:
+                            window_start = time.time()
+                            continue
+                        break
+
+                    is_attacked, adv = self._pre_attack(copy.deepcopy(dnf_objectives), timeout=min(2.0, remaining))
                     if is_attacked:
                         self.violation_samples.append(adv.clone().cpu())
                         logger.info(f'[Diversity] Pre-attack sample {len(self.violation_samples)}/{Settings.diversity_k}')
-                    else:
-                        break # if attack fails, DPLL is needed
+
+                    progress_interval = 5.0 if self.violation_samples else 10.0
+                    if getattr(Settings, 'quiet_sampler', False) and time.time() - last_progress >= progress_interval:
+                        print(
+                            f'c Random-search progress: {len(self.violation_samples)}/'
+                            f'{Settings.diversity_k} samples after {time.time() - random_start:.1f}s'
+                        )
+                        last_progress = time.time()
 
                 if engine == 'random':
-                    # no fallback: return whatever the random phase produced
+                    self.random_samples_found = len(self.violation_samples)
                     return ReturnStatus.SAT if len(self.violation_samples) else ReturnStatus.UNKNOWN
 
-                # 'auto': accept the random witnesses only if they are both enough and spread out
+                if len(self.violation_samples) >= Settings.diversity_k:
+                    self.random_samples_found = len(self.violation_samples)
+                    return ReturnStatus.SAT
+
                 score = normalized_diversity(
                     self.violation_samples,
                     getattr(self, 'sampling_lower', None),
                     getattr(self, 'sampling_upper', None),
                 )
-                threshold = Settings.diversity_threshold
-                if len(self.violation_samples) >= Settings.diversity_k and score >= threshold:
-                    logger.info(f'[Diversity] Random engine accepted ({score=:.04f} >= {threshold=})')
-                    return ReturnStatus.SAT
-
-                reason = 'too few samples' if len(self.violation_samples) < Settings.diversity_k else 'not diverse enough'
+                acceptance = len(self.violation_samples) / max(self.random_inputs_tested, 1)
                 logger.info(
-                    f'[Diversity] Random engine rejected ({reason}: '
-                    f'{len(self.violation_samples)}/{Settings.diversity_k} samples, {score=:.04f}, {threshold=})'
-                    f' -- falling back to highdiv'
+                    f'[Diversity] Switching to HighDiv after random search '
+                    f'({len(self.violation_samples)}/{Settings.diversity_k} samples, '
+                    f'acceptance={acceptance:.1%}, diversity={score:.04f})'
                 )
-                # set the witnesses aside: DPLL restarts from an empty set so that
-                # activation-pattern blocking is driven by its own witnesses only
+                if getattr(Settings, 'quiet_sampler', False):
+                    print(
+                        f'c Switching to HighDiv mode after random search: '
+                        f'{len(self.violation_samples)}/{Settings.diversity_k} samples, '
+                        f'acceptance {acceptance:.1%}, diversity {score:.4f}'
+                    )
                 self.random_samples = self.violation_samples
+                self.random_samples_found = len(self.random_samples)
                 self.violation_samples = []
+                self.highdiv_start = time.time()
+                self.highdiv_last_progress = self.highdiv_start
+            else:
+                self.random_samples_found = 0
+                self.highdiv_start = time.time()
+                self.highdiv_last_progress = self.highdiv_start
+                if getattr(Settings, 'quiet_sampler', False):
+                    print(f'c Starting HighDiv mode for {Settings.diversity_k} samples')
             self.adv = None
         else:
             is_attacked, self.adv = self._pre_attack(copy.deepcopy(dnf_objectives), timeout=min(10.0, timeout * 0.1))
@@ -415,6 +461,16 @@ class Verifier:
             
             # search
             self._parallel_dpll()
+
+            if getattr(Settings, 'use_diversity_sampling', False) and \
+                    getattr(Settings, 'quiet_sampler', False) and hasattr(self, 'highdiv_start'):
+                progress_interval = 5.0 if self.violation_samples else 10.0
+                if time.time() - self.highdiv_last_progress >= progress_interval:
+                    print(
+                        f'c HighDiv progress: {len(self.violation_samples)}/'
+                        f'{Settings.diversity_k} samples after {time.time() - self.highdiv_start:.1f}s'
+                    )
+                    self.highdiv_last_progress = time.time()
                 
             # check adv founded
             if self.adv is not None:

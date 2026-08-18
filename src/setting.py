@@ -1,15 +1,25 @@
 import torch
 import json
 import os
+import sys
+
+QUIET_SAMPLER = ('-s' in sys.argv or '--num_samples' in sys.argv) and \
+    '-v' not in sys.argv and '--verbose' not in sys.argv
 
 try:
     import gurobipy as grb
-    grb.Model('test')
+    if QUIET_SAMPLER:
+        gurobi_env = grb.Env(empty=True)
+        gurobi_env.setParam('OutputFlag', 0)
+        gurobi_env.start()
+        grb.Model('test', env=gurobi_env)
+    else:
+        grb.Model('test')
     USE_GUROBI = True
 except:
     print("[!] Gurobi License not found!")
     USE_GUROBI = False
-    
+
 from configure.advanced import BaseSettings, AdvancedSettings
 
 class GlobalSettings(BaseSettings):
@@ -17,36 +27,36 @@ class GlobalSettings(BaseSettings):
     def __init__(self):
         # data precision
         torch.set_default_dtype(torch.float32)
-        
+
         # restart
         self.use_restart = True
-        
+
         # stabilize
         self.use_mip_tightening = True
-        
+
         # attack
         self.use_attack = True
         self.attack_interval = 10
-        
+
         # mip verify
-        self.use_mip_verify = True 
-        
-        # threshold for input/hidden splitting: 
+        self.use_mip_verify = True
+
+        # threshold for input/hidden splitting:
         self.input_splitting_threshold = 0.5  # > 0.5: use input splitting
         self.hidden_splitting_threshold = 0.01  # < 0.01: use hidden splitting
         self.safety_num_input_perturbed = 200 # < 200: use input splitting
-        
+
         # preprocess
         self.skip_preprocess = False
-        
+
         # proof
         self.use_save_reasoning_step = False
-        
+
         # early stopping
         self.max_iterations = 1e9
         self.skip_initial_worst_bound = -1e6
         self.max_domains = 1e9
-        
+
         # --- NeuralSAT-Div: HighDiv-style diverse sampling ---
         self.use_diversity_sampling = False   # activate sampling mode
         self.diversity_k = 10                 # target number of violation witnesses
@@ -55,17 +65,17 @@ class GlobalSettings(BaseSettings):
         self.diversity_bam_n = 5             # PAIS: polytope samples per activation region
         self.diversity_stochastic_prob = 0.3 # probability of random neuron + phase (stochastic DPLL)
         self.diversity_blocking_topk = None  # None = block full pattern; int = block only top-k neurons
-        
+
         # decomposition
         self.use_decompose = False
-        
-    
+
+
     def _add_advanced_settings(self, args=None):
         advanced = AdvancedSettings(args)
         for key, value in advanced.__dict__.items():
             if not key.startswith('_') and key != 'advanced_settings':
                 setattr(self, key, value)
-    
+
     def setup(self, args=None):
         if args is not None:
             if hasattr(args, 'disable_attack'):
@@ -76,10 +86,10 @@ class GlobalSettings(BaseSettings):
                 self.use_mip_tightening = args.disable_stabilize and USE_GUROBI
         else:
             self.use_mip_tightening = USE_GUROBI
-        
+
         # add advanced settings
         self._add_advanced_settings(args)
-        
+
         # TODO: remove this
         # self.use_mip_verify = False
         # self.use_mip_tightening = False
@@ -89,7 +99,7 @@ class GlobalSettings(BaseSettings):
         # self.restart_visited_hidden_branches = 100
         # self.share_alphas = True
         # self.skip_preprocess = False
-        
+
         # load specific settings from json
         if args is not None and args.setting_file is not None:
             assert os.path.exists(args.setting_file), f"Setting file not found: {args.setting_file=}"
@@ -101,5 +111,5 @@ class GlobalSettings(BaseSettings):
         if self.use_save_reasoning_step:
             torch.set_default_dtype(torch.float64)
             print(f'[!] Using float64 for proof generation')
-            
+
 Settings = GlobalSettings()

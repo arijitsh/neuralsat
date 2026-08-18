@@ -1,4 +1,6 @@
 import argparse
+import csv
+import logging
 import warnings
 import torch
 import time
@@ -18,7 +20,38 @@ from verifier.utils import normalized_diversity
 
 from setting import Settings
 
- 
+
+def activation_diversity(net: torch.nn.Module, samples: list[torch.Tensor], device: str) -> tuple[float | None, int, list[float]]:
+    """Return aggregate and per-ReLU-layer normalized Hamming diversity."""
+    if len(samples) < 2:
+        return 0.0, 0, []
+
+    activations = []
+    hooks = []
+    for module in net.modules():
+        if isinstance(module, torch.nn.ReLU):
+            hooks.append(module.register_forward_hook(
+                lambda _module, _args, output: activations.append((output > 0).flatten(start_dim=1).detach().cpu())
+            ))
+
+    if not hooks:
+        return None, 0, []
+
+    try:
+        with torch.no_grad():
+            net(torch.cat([sample.to(device) for sample in samples], dim=0))
+    finally:
+        for hook in hooks:
+            hook.remove()
+
+    pattern = torch.cat(activations, dim=1)
+    layerwise = [
+        (torch.pdist(layer.float(), p=1) / layer.shape[1]).mean().item()
+        for layer in activations
+    ]
+    return (torch.pdist(pattern.float(), p=1) / pattern.shape[1]).mean().item(), pattern.shape[1], layerwise
+
+
 if __name__ == '__main__':
     START_TIME = time.time()
 
@@ -38,7 +71,9 @@ if __name__ == '__main__':
                         help="timeout in seconds")
     parser.add_argument('--device', type=str, default='cuda',
                         help="choose device to use for verifying.")
-    parser.add_argument('--verbosity', type=int, choices=[0, 1, 2], default=2, 
+    parser.add_argument('-v', '--verbose', action='store_true',
+                        help='show detailed sampler logs and model information.')
+    parser.add_argument('--verbosity', type=int, choices=[0, 1, 2], default=None,
                         help='the logger level (0: NOTSET, 1: INFO, 2: DEBUG).')
     parser.add_argument('--result_file', type=str, required=False,
                         help="file to save execution results.")
@@ -70,6 +105,8 @@ if __name__ == '__main__':
                         help="'auto' engine: normalized mean pairwise distance below which the random samples are rejected (default: 0.05).")
     parser.add_argument('--sample_output', type=str, required=False,
                         help="file to save sampled counter-examples to (.npy).")
+    parser.add_argument('--csv-samples', type=str, required=False,
+                        help="file to save sampled counter-examples and their network outputs to (.csv).")
     parser.add_argument('--diversity_prob', type=float, default=None,
                         help="probability of random neuron/phase selection in stochastic DPLL (default: 0.3).")
     parser.add_argument('--diversity_bam_n', type=int, default=None,
@@ -77,9 +114,12 @@ if __name__ == '__main__':
     parser.add_argument('--diversity_blocking_topk', type=int, default=None,
                         help="block only the top-k most constrained neurons instead of the full activation pattern.")
 
-    args = parser.parse_args()   
+    args = parser.parse_args()
+    quiet_sampler = args.num_samples is not None and not (args.verbose or args.verbosity is not None)
     Settings.setup(args)
-    print(Settings)
+    Settings.quiet_sampler = quiet_sampler
+    if not quiet_sampler:
+        print(Settings)
     
     if os.environ.get('NEURALSAT_SYNTHETIC_BUG_DROP_PROBABILITY'):
         assert Settings.use_save_reasoning_step, 'Reasoning step is required for synthetic bug'
@@ -89,7 +129,9 @@ if __name__ == '__main__':
         args.device = 'cpu'
         
     # set logger level
-    logger.setLevel(LOGGER_LEVEL[args.verbosity])
+    logger.setLevel(logging.WARNING if quiet_sampler else (
+        logging.DEBUG if args.verbose or args.verbosity is None else LOGGER_LEVEL[args.verbosity]
+    ))
     
     # network
     if args.net.endswith('.onnx'):
@@ -106,13 +148,20 @@ if __name__ == '__main__':
     
     model.to(args.device)
 
-    if args.verbosity:
+    if not quiet_sampler and (args.verbose or args.verbosity is None or args.verbosity):
         print(model)
-    logger.info(f'[!] Input shape: {input_shape}')
-    logger.info(f'[!] Output shape: {output_shape}')
+    if quiet_sampler:
+        print(f'c Input shape: {input_shape}')
+        print(f'c Output shape: {output_shape}')
+    else:
+        logger.info(f'[!] Input shape: {input_shape}')
+        logger.info(f'[!] Output shape: {output_shape}')
     
     # specification
     objectives = parse_vnnlib(args.spec, input_shape)
+    if quiet_sampler:
+        output_count = objectives.cs[0].shape[-1] if isinstance(objectives.cs, list) else objectives.cs.shape[-1]
+        print(f'c VNNLIB: {objectives.lower_bounds.shape[-1]} inputs, {output_count} outputs')
     
     # verifier
     verifier = Verifier(
@@ -136,6 +185,9 @@ if __name__ == '__main__':
             Settings.diversity_blocking_topk = args.diversity_blocking_topk
 
         timeout = args.timeout - (time.time() - START_TIME)
+        if quiet_sampler and args.sampling_engine in ('random', 'auto'):
+            pre_attack_timeout = min(20.0, timeout * 0.5)
+            print(f"c Starting multi-seed pre-attack for {pre_attack_timeout:.1f}s (engine='{args.sampling_engine}')")
         samples = verifier.sample_violations(
             dnf_objectives=objectives,
             k=args.num_samples,
@@ -145,20 +197,57 @@ if __name__ == '__main__':
         runtime = time.time() - START_TIME
 
         score = normalized_diversity(samples, verifier.sampling_lower, verifier.sampling_upper)
-        logger.info(f'[!] Collected {len(samples)}/{args.num_samples} samples in {runtime:.04f}s')
-        logger.info(f'[!] Diversity (normalized mean pairwise L2): {score:.04f}')
-        for idx, sample in enumerate(samples):
-            flat = sample.flatten().detach().cpu()
-            output = verifier.net(sample.to(args.device)).flatten().detach().cpu()
-            print(f'sample {idx}: input={flat.tolist()}')
-            print(f'sample {idx}: output={output.tolist()}')
+        neuron_score, neuron_count, layerwise_neuron_scores = activation_diversity(verifier.net, samples, args.device)
+        if quiet_sampler:
+            print(f'c Collected {len(samples)}/{args.num_samples} samples in {runtime:.04f}s')
+            if verifier.random_inputs_tested:
+                print(
+                    f'c Needed {verifier.random_inputs_tested} random generations to get '
+                    f'{getattr(verifier, "random_samples_found", 0)} random samples '
+                    f'({verifier.random_inputs_failed} rejected)'
+                )
+            print(f'c Diversity (normalized mean pairwise L2): {score:.04f}')
+            print('c Activation diversity: unavailable (no ReLU modules found)'
+                  if neuron_score is None else f'c Activation diversity: {neuron_score:.04f}')
+            if neuron_score is not None:
+                formatted_layerwise = ' '.join(f'{score:.04f}' for score in layerwise_neuron_scores)
+                print(f'c Layerwise activation diversity: [{formatted_layerwise}]')
+        else:
+            logger.info(f'[!] Collected {len(samples)}/{args.num_samples} samples in {runtime:.04f}s')
+            logger.info(f'[!] Diversity (normalized mean pairwise L2): {score:.04f}')
+            if neuron_score is None:
+                logger.info('[!] Activation diversity: unavailable (no ReLU modules found)')
+            else:
+                logger.info(
+                    f'[!] Activation diversity (mean pairwise Hamming over {neuron_count} ReLU neurons): '
+                    f'{neuron_score:.04f}'
+                )
 
         if args.sample_output:
             import numpy as np
             np.save(args.sample_output, torch.stack([s.cpu() for s in samples]).numpy() if samples else np.empty(0))
-            print(f'[!] Saved {len(samples)} samples to {args.sample_output}')
+            if quiet_sampler:
+                print(f'c Saved {len(samples)} samples to {args.sample_output}')
+            else:
+                print(f'[!] Saved {len(samples)} samples to {args.sample_output}')
 
-        print(f'{len(samples)},{runtime:.04f}')
+        if args.csv_samples:
+            input_names = [f'X_{i}' for i in range(int(torch.tensor(input_shape).prod()))]
+            output_names = [f'Y_{i}' for i in range(int(torch.tensor(output_shape).prod()))]
+            with open(args.csv_samples, 'w', newline='') as csv_file:
+                writer = csv.writer(csv_file)
+                writer.writerow([*input_names, *output_names])
+                for sample in samples:
+                    flat_input = sample.flatten().detach().cpu()
+                    flat_output = verifier.net(sample.to(args.device)).flatten().detach().cpu()
+                    writer.writerow([*flat_input.tolist(), *flat_output.tolist()])
+            if quiet_sampler:
+                print(f'c Saved {len(samples)} samples with outputs to {args.csv_samples}')
+            else:
+                print(f'[!] Saved {len(samples)} samples with outputs to {args.csv_samples}')
+
+        if not quiet_sampler:
+            print(f'{len(samples)},{runtime:.04f}')
         exit(0)
 
     # verify

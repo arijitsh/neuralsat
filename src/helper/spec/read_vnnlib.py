@@ -12,6 +12,7 @@ import numpy as np
 import tqdm
 import re
 import os
+import logging
 
 from helper.misc.logger import logger
 
@@ -254,7 +255,7 @@ def _read_vnnlib(vnnlib_filename: str, regression: bool = False, mismatch_input_
 
         for rv_tuple in old_rv:
             if len(conjuncts) > 10:
-                pbar = tqdm.tqdm(conjuncts)
+                pbar = tqdm.tqdm(conjuncts, disable=not logger.isEnabledFor(logging.INFO))
             else:
                 pbar = conjuncts
 
@@ -309,5 +310,4 @@ def _read_vnnlib(vnnlib_filename: str, regression: bool = False, mismatch_input_
         final_rv.append((box, spec_list))
 
     return final_rv
-
 

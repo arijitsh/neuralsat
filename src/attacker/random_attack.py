@@ -16,6 +16,8 @@ class RandomAttacker:
         self.objective = objective
         self.input_shape = input_shape
         self.device = device
+        self.random_inputs_tested = 0
+        self.random_inputs_failed = 0
 
         if np.prod(self.input_shape) >= 200:
             return None
@@ -185,13 +187,14 @@ class RandomAttacker:
             assert torch.all(input_lowers <= s_in) and torch.all(s_in <= input_uppers)
         s_out = self.net(s_in)
         samples = []
-        for cs, rhs in zip(self.objective.cs.to(self.device), self.objective.rhs.to(self.device)):
-            vec = cs @ s_out.transpose(0, 1)
-            for i in range(self.n_samples):
-                if torch.all(vec[:, i] <= rhs):
+        constraints = list(zip(self.objective.cs.to(self.device), self.objective.rhs.to(self.device)))
+        for i in range(self.n_samples):
+            self.random_inputs_tested += 1
+            for cs, rhs in constraints:
+                if torch.all(cs @ s_out[i] <= rhs):
                     return True, [(s_in[i].view(self.input_shape), s_out[i].flatten())]
-                sample = s_in[i].flatten(), s_out[i].flatten()
-                samples.append(sample)
+            self.random_inputs_failed += 1
+            samples.append((s_in[i].flatten(), s_out[i].flatten()))
         return False, samples
 
 

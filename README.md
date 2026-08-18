@@ -7,23 +7,27 @@
 ## Sampler Mode
 We extend NeuralSAT to be a sampler, which inputs that violate the specification. During that process, it mimics the behaviour of [HighDiv SMT Sampler](https://github.com/laigroup/HighDiv).
 
-### Diversity Tester
-The sampler also comes with a diversity tester for the genreated samples.
-```
-eval_diversity.py
-```
 This version extends NeuralSAT to generate multiple, distinct counterexamples for violated properties natively using a stochastic DPLL branch-and-bound search.
 - From the command line, pass `-s k` (alias `--num_samples k`) to `src/main.py` to collect `k` distinct counterexamples instead of a single verification answer:
 ```bash
-python src/main.py --net model.onnx --spec prop.vnnlib -s 10 --sample_output samples.npy
+python src/main.py --net model.onnx --spec prop.vnnlib -s 10 --sample_output samples.npy --csv-samples samples.csv
 ```
 - `--sampling-engine <highdiv|random|auto>` picks how the witnesses are produced (default `auto`):
   - `random` — multi-seed attack only. Fast, but the samples cluster wherever the attack lands.
   - `highdiv` — stochastic DPLL only, with PAIS polytope sampling and activation-pattern blocking.
   - `auto` — run `random` first, then score it; if it returned fewer than `k` samples or their normalized mean pairwise distance is below `--diversity_threshold` (default `0.05`), discard them and fall back to `highdiv`. If DPLL then runs out of time before reaching `k`, the leftover random witnesses top up the result by farthest-point selection.
-  Tuning flags: `--diversity_prob` (stochastic DPLL randomness), `--diversity_bam_n` (PAIS samples per region), `--diversity_blocking_topk` (partial pattern blocking).
+<!-- Tuning flags: `--diversity_prob` (stochastic DPLL randomness), `--diversity_bam_n` (PAIS samples per region), `--diversity_blocking_topk` (partial pattern blocking).
 - Programmatically, call `Verifier.sample_violations(objectives, k=...)`, or set `Settings.use_diversity_sampling = True` and `Settings.diversity_k = k`.
-- For evaluation scripts and metric calculations, see the [VNN-COMP Scripts README](./vnncomp_scripts/README.md).
+- For evaluation scripts and metric calculations, see the [VNN-COMP Scripts README](./vnncomp_scripts/README.md). -->
+
+### Diversity Tester
+The sampler also comes with a diversity tester for the genreated samples.
+```
+  python vnncomp_scripts/eval_diversity.py \
+    --net ieee14/relu_policy.onnx \
+    --csv-samples samples.csv \
+    --show-activation
+```
 
 ## NEWS
 - NeuralSAT is ranked **2nd overall** at [VNN-COMP'25](https://arxiv.org/pdf/2512.19007)

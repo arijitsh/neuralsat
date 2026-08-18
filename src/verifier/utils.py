@@ -457,7 +457,11 @@ def _setup_restart(self: verifier.verifier.Verifier, nth_restart: int, objective
 def _pre_attack(self: verifier.verifier.Verifier, dnf_objectives: DnfObjectives, 
                 timeout: int | float = 10.0) -> tuple[bool, torch.Tensor | None]:
     if Settings.use_attack:
-        return Attacker(self.net, dnf_objectives, self.input_shape, device=self.device).run(timeout=timeout)
+        attacker = Attacker(self.net, dnf_objectives, self.input_shape, device=self.device)
+        result = attacker.run(timeout=timeout)
+        self.random_inputs_tested = getattr(self, 'random_inputs_tested', 0) + attacker.random_inputs_tested
+        self.random_inputs_failed = getattr(self, 'random_inputs_failed', 0) + attacker.random_inputs_failed
+        return result
     return False, None
     
 @beartype

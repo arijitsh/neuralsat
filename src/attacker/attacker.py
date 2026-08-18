@@ -22,6 +22,8 @@ class Attacker:
     
     @beartype
     def __init__(self: 'Attacker', net: ConvertModel | torch.nn.Module, objective: DnfObjectives, input_shape: tuple, device: str) -> None:
+        self.random_inputs_tested = 0
+        self.random_inputs_failed = 0
         self.attackers = [
             RandomAttacker(net, objective, input_shape, device=device),
             PGDAttacker(net, objective, input_shape, device=device),
@@ -55,6 +57,9 @@ class Attacker:
                 raise NotImplementedError
             else:
                 gc_cuda()
+            if isinstance(atk, RandomAttacker):
+                self.random_inputs_tested += atk.random_inputs_tested
+                self.random_inputs_failed += atk.random_inputs_failed
             logger.info(f"{'[Success]' if is_attacked else '[Failed]'} {atk}")
             if is_attacked:
                 return is_attacked, adv
@@ -121,4 +126,3 @@ class PGDAttacker:
     
     def __str__(self):
         return f'PGDAttack(seed={self.seed}, device={self.device})'
-
