@@ -51,7 +51,9 @@ def check_adv_multi(input: torch.Tensor, output: torch.Tensor,
         
         for i, num_cond in enumerate(cond_mat[0]):
             x_index.extend([i] * num_cond)
-            y_index.extend([index+j] for j in range(num_cond))
+            # Flat indices pair each constraint with its own AND group.
+            # Nested indices broadcast across groups, incorrectly merging ORs.
+            y_index.extend(index+j for j in range(num_cond))
             index += num_cond
 
         group_C[x_index, y_index] = 1.0

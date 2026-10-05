@@ -81,7 +81,13 @@ def farthest_point_padding(samples: list, pool: list, k: int) -> list:
     collapsing its diversity.
     """
     selected = list(samples)
-    remaining = list(pool)
+    seen = {tuple(s.flatten().tolist()) for s in selected}
+    remaining = []
+    for sample in pool:
+        key = tuple(sample.flatten().tolist())
+        if key not in seen:
+            seen.add(key)
+            remaining.append(sample)
     while len(selected) < k and remaining:
         if not selected:
             selected.append(remaining.pop(0))
@@ -674,8 +680,7 @@ def _check_full_assignment(self: verifier.verifier.Verifier, domain_params: Abst
                 extra_samples = pais.sample()
                 if hasattr(self, 'violation_samples'):
                     for xs in extra_samples:
-                        if len(self.violation_samples) < Settings.diversity_k:
-                            self.violation_samples.append(xs.cpu())
+                        self._add_violation_sample(xs)
 
                 # --- Bidirectional guidance: block this activation region ---
                 # Add this domain's history as a conflict clause so the DPLL

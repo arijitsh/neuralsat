@@ -40,9 +40,12 @@ class Attacker:
             if time.time() - tic > timeout:
                 return False, None
             remaining_timeout = timeout - (time.time() - tic)
-            seed = random.randint(0, 1000)
-            atk.manual_seed(seed)
+            seed = random.getrandbits(32)
+            # Attackers reseed Python's global RNG. Restore the seed-selection
+            # stream afterwards so repeated attacks cannot enter a seed cycle.
+            random_state = random.getstate()
             try:
+                atk.manual_seed(seed)
                 # attacker using float64 might get OOM
                 is_attacked, adv = atk.run(timeout=remaining_timeout)
             except RuntimeError as exception:
@@ -57,6 +60,8 @@ class Attacker:
                 raise NotImplementedError
             else:
                 gc_cuda()
+            finally:
+                random.setstate(random_state)
             if isinstance(atk, RandomAttacker):
                 self.random_inputs_tested += atk.random_inputs_tested
                 self.random_inputs_failed += atk.random_inputs_failed

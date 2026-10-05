@@ -186,8 +186,8 @@ if __name__ == '__main__':
 
         timeout = args.timeout - (time.time() - START_TIME)
         if quiet_sampler and args.sampling_engine in ('random', 'auto'):
-            pre_attack_timeout = min(20.0, timeout * 0.5)
-            print(f"c Starting multi-seed pre-attack for {pre_attack_timeout:.1f}s (engine='{args.sampling_engine}')")
+            print(f"c Starting multi-seed pre-attack (engine='{args.sampling_engine}', "
+                  f"target={args.num_samples}, remaining timeout={max(timeout, 0):.1f}s)")
         samples = verifier.sample_violations(
             dnf_objectives=objectives,
             k=args.num_samples,

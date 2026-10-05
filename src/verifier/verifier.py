@@ -100,17 +100,17 @@ class Verifier:
 
         `engine` selects how the witnesses are produced and overrides
         Settings.sampling_engine when given:
-          'random'  – multi-seed pre-attack only, no DPLL search
+          'random'  – multi-seed pre-attack until k distinct inputs or timeout
           'highdiv' – skip the pre-attack, go straight to the loop above
-          'auto'    – run 'random' first and keep its result only if it yields k
-                      witnesses whose normalized mean pairwise distance clears
-                      Settings.diversity_threshold; otherwise fall back to 'highdiv'
+          'auto'    – assess random acceptance and diversity every 20 seconds;
+                      fall back to 'highdiv' if either is inadequate
         """
         if engine is not None:
             Settings.sampling_engine = engine
         Settings.use_diversity_sampling = True
         Settings.diversity_k = k
         self.violation_samples: list = []
+        self._sample_keys: set = set()
         self.random_samples: list = []  # 'auto': witnesses kept from the discarded random phase
         self.start_time = time.time()
         self.total_time = timeout
@@ -137,6 +137,18 @@ class Verifier:
 
         Settings.use_diversity_sampling = False
         return self.violation_samples
+
+    def _add_violation_sample(self, sample: torch.Tensor) -> bool:
+        """Count distinct inputs, and never exceed the requested budget."""
+        if len(self.violation_samples) >= Settings.diversity_k:
+            return False
+        sample = sample.detach().clone().cpu()
+        key = tuple(sample.flatten().tolist())
+        if key in self._sample_keys:
+            return False
+        self._sample_keys.add(key)
+        self.violation_samples.append(sample)
+        return True
     
     
     @beartype
@@ -163,7 +175,9 @@ class Verifier:
                     total_remaining = self.total_time - (time.time() - self.start_time)
                     if total_remaining <= 0:
                         break
-                    remaining = min(window_start + 20.0 - time.time(), total_remaining)
+                    remaining = total_remaining if engine == 'random' else min(
+                        window_start + 20.0 - time.time(), total_remaining
+                    )
                     if remaining <= 0:
                         score = normalized_diversity(
                             self.violation_samples,
@@ -188,8 +202,7 @@ class Verifier:
                         break
 
                     is_attacked, adv = self._pre_attack(copy.deepcopy(dnf_objectives), timeout=min(2.0, remaining))
-                    if is_attacked:
-                        self.violation_samples.append(adv.clone().cpu())
+                    if is_attacked and self._add_violation_sample(adv):
                         logger.info(f'[Diversity] Pre-attack sample {len(self.violation_samples)}/{Settings.diversity_k}')
 
                     progress_interval = 5.0 if self.violation_samples else 10.0
@@ -228,6 +241,7 @@ class Verifier:
                 self.random_samples = self.violation_samples
                 self.random_samples_found = len(self.random_samples)
                 self.violation_samples = []
+                self._sample_keys.clear()
                 self.highdiv_start = time.time()
                 self.highdiv_last_progress = self.highdiv_start
             else:
@@ -255,7 +269,7 @@ class Verifier:
         is_attacked, self.adv = self._mip_attack(reference_bounds)
         if is_attacked:
             if getattr(Settings, 'use_diversity_sampling', False):
-                self.violation_samples.append(self.adv.clone().cpu())
+                self._add_violation_sample(self.adv)
                 logger.info(f'[Diversity] MIP-attack sample {len(self.violation_samples)}/{Settings.diversity_k}')
                 if len(self.violation_samples) >= Settings.diversity_k:
                     return ReturnStatus.SAT
@@ -455,6 +469,10 @@ class Verifier:
         start_iteration = self.iteration
 
         while len(self.domains_list) > 0:
+            # Sampling restarts after each witness; check the deadline even
+            # when a restart would otherwise bypass the timeout below.
+            if getattr(Settings, 'use_diversity_sampling', False) and self._check_timeout(timeout):
+                return ReturnStatus.TIMEOUT
             # early stop
             if self.domains_list.minimum_lowers < Settings.skip_initial_worst_bound:
                 return ReturnStatus.EARLY_STOP
@@ -477,7 +495,7 @@ class Verifier:
                 if self._check_adv(self.adv, objective):
                     if getattr(Settings, 'use_diversity_sampling', False):
                         # --- HighDiv Phase 1 result: collect witness ---
-                        self.violation_samples.append(self.adv.clone().cpu())
+                        self._add_violation_sample(self.adv)
                         logger.info(
                             f'[Diversity] Collected sample '
                             f'{len(self.violation_samples)}/{Settings.diversity_k}'

@@ -13,9 +13,9 @@ This version extends NeuralSAT to generate multiple, distinct counterexamples fo
 python src/main.py --net model.onnx --spec prop.vnnlib -s 10 --sample_output samples.npy --csv-samples samples.csv
 ```
 - `--sampling-engine <highdiv|random|auto>` picks how the witnesses are produced (default `auto`):
-  - `random` — multi-seed attack only. Fast, but the samples cluster wherever the attack lands.
+  - `random` — multi-seed attack until `k` distinct counterexamples are collected or `--timeout` expires (default 3600 seconds). Low acceptance or diversity does not stop this engine early.
   - `highdiv` — stochastic DPLL only, with PAIS polytope sampling and activation-pattern blocking.
-  - `auto` — run `random` first, then score it; if it returned fewer than `k` samples or their normalized mean pairwise distance is below `--diversity_threshold` (default `0.05`), discard them and fall back to `highdiv`. If DPLL then runs out of time before reaching `k`, the leftover random witnesses top up the result by farthest-point selection.
+  - `auto` — start with random attacks and assess them every 20 seconds. Continue randomly if acceptance is at least 10% and normalized mean pairwise distance meets `--diversity_threshold` (default `0.05`); otherwise switch to `highdiv`. Stop when `k` distinct witnesses are collected. If DPLL returns fewer than `k`, leftover random witnesses top up the result by farthest-point selection, excluding duplicates.
 <!-- Tuning flags: `--diversity_prob` (stochastic DPLL randomness), `--diversity_bam_n` (PAIS samples per region), `--diversity_blocking_topk` (partial pattern blocking).
 - Programmatically, call `Verifier.sample_violations(objectives, k=...)`, or set `Settings.use_diversity_sampling = True` and `Settings.diversity_k = k`.
 - For evaluation scripts and metric calculations, see the [VNN-COMP Scripts README](./vnncomp_scripts/README.md). -->
@@ -271,4 +271,3 @@ The *NeuralSAT* research is partially supported by grants from NSF
   and
   an [Amazon Research Award](https://www.amazon.science/research-awards/program-updates/79-amazon-research-awards-recipients-announced) and
   an NVIDIA Academic Grant.
-
