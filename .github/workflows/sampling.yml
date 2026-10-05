@@ -1,0 +1,57 @@
+name: Sampling
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  sampling:
+    name: Python ${{ matrix.python }} / ${{ matrix.engine }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ['3.10', '3.11']
+        engine: [random, highdiv, auto]
+    env:
+      OMP_NUM_THREADS: '2'
+      MKL_NUM_THREADS: '2'
+      OPENBLAS_NUM_THREADS: '2'
+      SAMPLING_ENGINE: ${{ matrix.engine }}
+      SAMPLING_TIMEOUT: '600'
+      # Exercise the fallback used when no Gurobi license is configured.
+      GRB_LICENSE_FILE: /tmp/neuralsat-ci-no-license.lic
+      PYTHONUNBUFFERED: '1'
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+          cache-dependency-path: requirements.txt
+      - name: Install Linux dependencies from doc/INSTALL.md
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libbz2-dev lzma liblzma-dev
+      - name: Install NeuralSAT in a virtual environment
+        run: |
+          python -m venv neuralsat_env
+          neuralsat_env/bin/python -m pip install --upgrade pip
+          neuralsat_env/bin/python -m pip install torch==2.1.2 torchvision==0.16.2 torchaudio==2.1.2 --index-url https://download.pytorch.org/whl/cpu
+          neuralsat_env/bin/python -m pip install -r requirements.txt
+          # Gurobi 11's malformed wheel Tag metadata causes false pip-check errors.
+      - name: Run CPU regressions and validate 1000 example samples
+        run: neuralsat_env/bin/python -m unittest discover -s tests -v
+      - name: Upload samples, sampler logs and validation results
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: samples-python-${{ matrix.python }}-${{ matrix.engine }}
+          path: sampling-artifacts/
+          if-no-files-found: warn
+          retention-days: 14
