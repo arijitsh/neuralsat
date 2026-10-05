@@ -1,0 +1,187 @@
+; Df in [-0.8,-0.5]Hz => UFLS; Df in [-1.0,-0.8)Hz => UFGT; Df in [0.5,1.0]Hz => OFGT
+; unsat = property HOLDS (no counterexample), sat = property VIOLATED (counterexample found)
+;
+; Network: CPO / IEEE-14-bus / FDIA policy net (relu_policy.onnx), 28 -> 47x5 (ReLU) -> 21 logits.
+; Domain quantified over: operating box (rollout-measured envelope, padded 10%).
+;
+; INPUTS  X_0..X_27 (28) - one instantaneous grid observation fed to the agent:
+;   X_0        Delta-omega: grid frequency deviation [Hz] (actual freq = 60.0 + X_0)
+;              safe band per paper's Xsafe: Delta-omega in [-0.5, +0.5] Hz (59.5-60.5 Hz)
+;   X_1..X_20  branch/transformer flow 1 of 20 (indices 1-20)
+;   X_21..X_25 generator terminal voltage Vt [p.u.], generators 1-5 (indices 21-25)
+;              safe band per paper's Xsafe: Vt in [0.95, 1.05] p.u.
+;   X_26       ||r||_2: state-estimation residual norm (FDIA detection statistic)
+;   X_27       Th: fixed detection threshold = 0.1*sqrt(14) = 0.374166 (constant, not a live sensor)
+;
+; OUTPUTS Y_0..Y_20 (21) - EACH Y_i IS AN ACTION: the network's score (logit) for
+; one discrete protective action, i.e. a percentage of load to shed or generation
+; to trip/reduce. Y_i is NEVER a frequency value. The agent takes argmax(Y); the
+; "effect" column below is what happens to grid frequency AFTER that action is
+; applied, not the value of Y_i itself:
+;   Y_0        NIL: take no protective action
+;   Y_1..Y_7   UFLS: shed 5/10/15/20/25/30/40 % of load        (effect: raises frequency)
+;   Y_8..Y_14  OFGT: trip 4/7/10/18/20/27/33 % of generation   (effect: lowers frequency)
+;   Y_15..Y_20 UFGT: reduce generation by 2/5/8/10/13/26 %     (effect: lowers frequency)
+;   (paper Sec. III/IV: real output layer is softmax; verifying the pre-softmax
+;   logits above is equivalent since softmax is monotonic and preserves argmax.)
+;
+; THIS PROPERTY: Df (X_0) constrained to [-1.0, 1.0] Hz, split into three zones
+; (the safe band -0.5 < Df < 0.5 has no required action and is not checked):
+;   -0.8 <= Df <= -0.5  -> required action family = UFLS (Y_1..Y_7)
+;   -1.0 <= Df <  -0.8  -> required action family = UFGT (Y_15..Y_20)
+;    0.5 <= Df <=  1.0  -> required action family = OFGT (Y_8..Y_14)
+; See the assert block below for the exact encoding.
+
+(declare-const X_0 Real)  ; input   0/27 - Delta-omega: grid frequency deviation [Hz] (actual freq = 60.0 + X_0)
+(declare-const X_1 Real)  ; input   1/27 - branch/transformer flow 1 of 20
+(declare-const X_2 Real)  ; input   2/27 - branch/transformer flow 2 of 20
+(declare-const X_3 Real)  ; input   3/27 - branch/transformer flow 3 of 20
+(declare-const X_4 Real)  ; input   4/27 - branch/transformer flow 4 of 20
+(declare-const X_5 Real)  ; input   5/27 - branch/transformer flow 5 of 20
+(declare-const X_6 Real)  ; input   6/27 - branch/transformer flow 6 of 20
+(declare-const X_7 Real)  ; input   7/27 - branch/transformer flow 7 of 20
+(declare-const X_8 Real)  ; input   8/27 - branch/transformer flow 8 of 20
+(declare-const X_9 Real)  ; input   9/27 - branch/transformer flow 9 of 20
+(declare-const X_10 Real)  ; input  10/27 - branch/transformer flow 10 of 20
+(declare-const X_11 Real)  ; input  11/27 - branch/transformer flow 11 of 20
+(declare-const X_12 Real)  ; input  12/27 - branch/transformer flow 12 of 20
+(declare-const X_13 Real)  ; input  13/27 - branch/transformer flow 13 of 20
+(declare-const X_14 Real)  ; input  14/27 - branch/transformer flow 14 of 20
+(declare-const X_15 Real)  ; input  15/27 - branch/transformer flow 15 of 20
+(declare-const X_16 Real)  ; input  16/27 - branch/transformer flow 16 of 20
+(declare-const X_17 Real)  ; input  17/27 - branch/transformer flow 17 of 20
+(declare-const X_18 Real)  ; input  18/27 - branch/transformer flow 18 of 20
+(declare-const X_19 Real)  ; input  19/27 - branch/transformer flow 19 of 20
+(declare-const X_20 Real)  ; input  20/27 - branch/transformer flow 20 of 20
+(declare-const X_21 Real)  ; input  21/27 - generator 1 of 5, terminal voltage Vt [p.u.]
+(declare-const X_22 Real)  ; input  22/27 - generator 2 of 5, terminal voltage Vt [p.u.]
+(declare-const X_23 Real)  ; input  23/27 - generator 3 of 5, terminal voltage Vt [p.u.]
+(declare-const X_24 Real)  ; input  24/27 - generator 4 of 5, terminal voltage Vt [p.u.]
+(declare-const X_25 Real)  ; input  25/27 - generator 5 of 5, terminal voltage Vt [p.u.]
+(declare-const X_26 Real)  ; input  26/27 - ||r||_2: state-estimation residual norm (FDIA detection statistic)
+(declare-const X_27 Real)  ; input  27/27 - Th: fixed detection threshold = 0.1*sqrt(14) = 0.374166 (constant, not a live sensor)
+(declare-const Y_0 Real)  ; output  0/20 - action 0 = NIL: take no protective action
+(declare-const Y_1 Real)  ; output  1/20 - action 1 = UFLS: shed 5% of load ( after acting: raises it)
+(declare-const Y_2 Real)  ; output  2/20 - action 2 = UFLS: shed 10% of load ( after acting: raises it)
+(declare-const Y_3 Real)  ; output  3/20 - action 3 = UFLS: shed 15% of load ( after acting: raises it)
+(declare-const Y_4 Real)  ; output  4/20 - action 4 = UFLS: shed 20% of load ( after acting: raises it)
+(declare-const Y_5 Real)  ; output  5/20 - action 5 = UFLS: shed 25% of load ( after acting: raises it)
+(declare-const Y_6 Real)  ; output  6/20 - action 6 = UFLS: shed 30% of load ( after acting: raises it)
+(declare-const Y_7 Real)  ; output  7/20 - action 7 = UFLS: shed 40% of load ( after acting: raises it)
+(declare-const Y_8 Real)  ; output  8/20 - action 8 = OFGT: trip 4% of generation ( after acting: lowers it)
+(declare-const Y_9 Real)  ; output  9/20 - action 9 = OFGT: trip 7% of generation ( after acting: lowers it)
+(declare-const Y_10 Real)  ; output 10/20 - action 10 = OFGT: trip 10% of generation ( after acting: lowers it)
+(declare-const Y_11 Real)  ; output 11/20 - action 11 = OFGT: trip 18% of generation ( after acting: lowers it)
+(declare-const Y_12 Real)  ; output 12/20 - action 12 = OFGT: trip 20% of generation ( after acting: lowers it)
+(declare-const Y_13 Real)  ; output 13/20 - action 13 = OFGT: trip 27% of generation ( after acting: lowers it)
+(declare-const Y_14 Real)  ; output 14/20 - action 14 = OFGT: trip 33% of generation ( after acting: lowers it)
+(declare-const Y_15 Real)  ; output 15/20 - action 15 = UFGT: reduce generation output by 2% ( after acting: lowers it)
+(declare-const Y_16 Real)  ; output 16/20 - action 16 = UFGT: reduce generation output by 5% ( after acting: lowers it)
+(declare-const Y_17 Real)  ; output 17/20 - action 17 = UFGT: reduce generation output by 8% ( after acting: lowers it)
+(declare-const Y_18 Real)  ; output 18/20 - action 18 = UFGT: reduce generation output by 10% ( after acting: lowers it)
+(declare-const Y_19 Real)  ; output 19/20 - action 19 = UFGT: reduce generation output by 13% ( after acting: lowers it)
+(declare-const Y_20 Real)  ; output 20/20 - action 20 = UFGT: reduce generation output by 26% ( after acting: lowers it)
+
+(assert (>= X_0 -1.00000000))  ; X_0 lower bound - Delta-omega: grid frequency deviation [Hz] (actual freq = 60.0 + X_0)
+(assert (<= X_0 1.00000000))  ; X_0 upper bound - Delta-omega: grid frequency deviation [Hz] (actual freq = 60.0 + X_0)
+  ;- widened to include over-frequency (OFGT) zone alongside the two under-frequency zones
+(assert (>= X_1 0.33929503))  ; X_1 lower bound - branch/transformer flow 1 of 20
+(assert (<= X_1 0.78956503))  ; X_1 upper bound - branch/transformer flow 1 of 20
+(assert (>= X_2 0.14196190))  ; X_2 lower bound - branch/transformer flow 2 of 20
+(assert (<= X_2 0.33803138))  ; X_2 upper bound - branch/transformer flow 2 of 20
+(assert (>= X_3 0.14449924))  ; X_3 lower bound - branch/transformer flow 3 of 20
+(assert (<= X_3 0.29979366))  ; X_3 upper bound - branch/transformer flow 3 of 20
+(assert (>= X_4 0.10069206))  ; X_4 lower bound - branch/transformer flow 4 of 20
+(assert (<= X_4 0.21937947))  ; X_4 upper bound - branch/transformer flow 4 of 20
+(assert (>= X_5 0.06200352))  ; X_5 lower bound - branch/transformer flow 5 of 20
+(assert (<= X_5 0.16126840))  ; X_5 upper bound - branch/transformer flow 5 of 20
+(assert (>= X_6 -0.15202609))  ; X_6 lower bound - branch/transformer flow 6 of 20
+(assert (<= X_6 -0.04495939))  ; X_6 upper bound - branch/transformer flow 6 of 20
+(assert (>= X_7 -0.30138263))  ; X_7 lower bound - branch/transformer flow 7 of 20
+(assert (<= X_7 -0.09001538))  ; X_7 upper bound - branch/transformer flow 7 of 20
+(assert (>= X_8 -0.00063443))  ; X_8 lower bound - branch/transformer flow 8 of 20
+(assert (<= X_8 0.04301821))  ; X_8 upper bound - branch/transformer flow 8 of 20
+(assert (>= X_9 0.00329971))  ; X_9 lower bound - branch/transformer flow 9 of 20
+(assert (<= X_9 0.03671267))  ; X_9 upper bound - branch/transformer flow 9 of 20
+(assert (>= X_10 0.01085336))  ; X_10 lower bound - branch/transformer flow 10 of 20
+(assert (<= X_10 0.08248101))  ; X_10 upper bound - branch/transformer flow 10 of 20
+(assert (>= X_11 -0.04093095))  ; X_11 lower bound - branch/transformer flow 11 of 20
+(assert (<= X_11 0.04136663))  ; X_11 upper bound - branch/transformer flow 11 of 20
+(assert (>= X_12 -0.02478100))  ; X_12 lower bound - branch/transformer flow 12 of 20
+(assert (<= X_12 0.05025358))  ; X_12 upper bound - branch/transformer flow 12 of 20
+(assert (>= X_13 -0.04329785))  ; X_13 lower bound - branch/transformer flow 13 of 20
+(assert (<= X_13 0.01157638))  ; X_13 upper bound - branch/transformer flow 13 of 20
+(assert (>= X_14 -0.00919827))  ; X_14 lower bound - branch/transformer flow 14 of 20
+(assert (<= X_14 0.01130695))  ; X_14 upper bound - branch/transformer flow 14 of 20
+(assert (>= X_15 -0.01744655))  ; X_15 lower bound - branch/transformer flow 15 of 20
+(assert (<= X_15 0.05232391))  ; X_15 upper bound - branch/transformer flow 15 of 20
+(assert (>= X_16 0.01057052))  ; X_16 lower bound - branch/transformer flow 16 of 20
+(assert (<= X_16 0.13688917))  ; X_16 upper bound - branch/transformer flow 16 of 20
+(assert (>= X_17 0.00616232))  ; X_17 lower bound - branch/transformer flow 17 of 20
+(assert (<= X_17 0.07832383))  ; X_17 upper bound - branch/transformer flow 17 of 20
+(assert (>= X_18 0.03869203))  ; X_18 lower bound - branch/transformer flow 18 of 20
+(assert (<= X_18 0.20239854))  ; X_18 upper bound - branch/transformer flow 18 of 20
+(assert (>= X_19 -0.00010000))  ; X_19 lower bound - branch/transformer flow 19 of 20
+(assert (<= X_19 0.00010000))  ; X_19 upper bound - branch/transformer flow 19 of 20
+(assert (>= X_20 0.01057052))  ; X_20 lower bound - branch/transformer flow 20 of 20
+(assert (<= X_20 0.13688917))  ; X_20 upper bound - branch/transformer flow 20 of 20
+(assert (>= X_21 1.05989993))  ; X_21 lower bound - generator 1 of 5, terminal voltage Vt [p.u.]
+(assert (<= X_21 1.06009996))  ; X_21 upper bound - generator 1 of 5, terminal voltage Vt [p.u.]
+(assert (>= X_22 1.04489994))  ; X_22 lower bound - generator 2 of 5, terminal voltage Vt [p.u.]
+(assert (<= X_22 1.04509997))  ; X_22 upper bound - generator 2 of 5, terminal voltage Vt [p.u.]
+(assert (>= X_23 1.00989997))  ; X_23 lower bound - generator 3 of 5, terminal voltage Vt [p.u.]
+(assert (<= X_23 1.01010001))  ; X_23 upper bound - generator 3 of 5, terminal voltage Vt [p.u.]
+(assert (>= X_24 1.06990004))  ; X_24 lower bound - generator 4 of 5, terminal voltage Vt [p.u.]
+(assert (<= X_24 1.07010007))  ; X_24 upper bound - generator 4 of 5, terminal voltage Vt [p.u.]
+(assert (>= X_25 1.08990002))  ; X_25 lower bound - generator 5 of 5, terminal voltage Vt [p.u.]
+(assert (<= X_25 1.09010005))  ; X_25 upper bound - generator 5 of 5, terminal voltage Vt [p.u.]
+(assert (>= X_26 0.18416604))  ; X_26 lower bound - ||r||_2: state-estimation residual norm (FDIA detection statistic)
+(assert (<= X_26 0.25247383))  ; X_26 upper bound - ||r||_2: state-estimation residual norm (FDIA detection statistic)
+(assert (>= X_27 0.37416574))  ; X_27 lower bound - Th: fixed detection threshold = 0.1*sqrt(14) = 0.374166 (constant, not a live sensor)
+(assert (<= X_27 0.37416574))  ; X_27 upper bound - Th: fixed detection threshold = 0.1*sqrt(14) = 0.374166 (constant, not a live sensor)
+
+; Encodes the VIOLATION, i.e. NOT(the required action family wins).
+;
+; This file's domain (X_0 bounds above) covers X_0 in [-1.0, 1.0], split into
+; three disjoint, exclusive zones (the safe band -0.5 < X_0 < 0.5 is left
+; unconstrained - no action family is required there):
+;   Zone UFLS: -0.8 <= X_0 <= -0.5  -> required S = {Y_1..Y_7}   (shed load)
+;   Zone UFGT: -1.0 <= X_0 <  -0.8  -> required S = {Y_15..Y_20} (cut generation)
+;   Zone OFGT:  0.5 <= X_0 <=  1.0  -> required S = {Y_8..Y_14}  (trip generation)
+; In each zone, only actions in that zone's S may win the argmax - NIL and the
+; other two action families must not win.
+;
+; CAVEAT: the X_1..X_27 bounds above (branch flows, generator voltages, FDIA
+; residual) were derived from rollouts of UNDER-frequency events only, per the
+; header. Reusing that same envelope for the OFGT zone (an over-frequency,
+; excess-generation condition) is an approximation - real over-frequency
+; operating conditions likely produce different flow/voltage patterns. If
+; you have over-frequency rollout data, those bounds should be re-derived and
+; made conditional on the sign of X_0 for a fully faithful property.
+;
+; Each inner disjunct names one candidate action j that is outside the zone's
+; S, and asserts j ties-or-beats every action in S - i.e. j could be the
+; argmax instead of a required action, which is the violation being searched
+; for.
+
+(assert (>= X_0 -0.80000000))
+(assert (<= X_0 -0.50000000))
+
+; ---- Zone UFLS: -0.8 <= X_0 <= -0.5, required S = {Y_1..Y_7} ----
+; Violation: one action outside S ties or exceeds every required UFLS action.
+(assert (or
+  (and (<= Y_1 Y_0) (<= Y_2 Y_0) (<= Y_3 Y_0) (<= Y_4 Y_0) (<= Y_5 Y_0) (<= Y_6 Y_0) (<= Y_7 Y_0))
+  (and (<= Y_1 Y_8) (<= Y_2 Y_8) (<= Y_3 Y_8) (<= Y_4 Y_8) (<= Y_5 Y_8) (<= Y_6 Y_8) (<= Y_7 Y_8))
+  (and (<= Y_1 Y_9) (<= Y_2 Y_9) (<= Y_3 Y_9) (<= Y_4 Y_9) (<= Y_5 Y_9) (<= Y_6 Y_9) (<= Y_7 Y_9))
+  (and (<= Y_1 Y_10) (<= Y_2 Y_10) (<= Y_3 Y_10) (<= Y_4 Y_10) (<= Y_5 Y_10) (<= Y_6 Y_10) (<= Y_7 Y_10))
+  (and (<= Y_1 Y_11) (<= Y_2 Y_11) (<= Y_3 Y_11) (<= Y_4 Y_11) (<= Y_5 Y_11) (<= Y_6 Y_11) (<= Y_7 Y_11))
+  (and (<= Y_1 Y_12) (<= Y_2 Y_12) (<= Y_3 Y_12) (<= Y_4 Y_12) (<= Y_5 Y_12) (<= Y_6 Y_12) (<= Y_7 Y_12))
+  (and (<= Y_1 Y_13) (<= Y_2 Y_13) (<= Y_3 Y_13) (<= Y_4 Y_13) (<= Y_5 Y_13) (<= Y_6 Y_13) (<= Y_7 Y_13))
+  (and (<= Y_1 Y_14) (<= Y_2 Y_14) (<= Y_3 Y_14) (<= Y_4 Y_14) (<= Y_5 Y_14) (<= Y_6 Y_14) (<= Y_7 Y_14))
+  (and (<= Y_1 Y_15) (<= Y_2 Y_15) (<= Y_3 Y_15) (<= Y_4 Y_15) (<= Y_5 Y_15) (<= Y_6 Y_15) (<= Y_7 Y_15))
+  (and (<= Y_1 Y_16) (<= Y_2 Y_16) (<= Y_3 Y_16) (<= Y_4 Y_16) (<= Y_5 Y_16) (<= Y_6 Y_16) (<= Y_7 Y_16))
+  (and (<= Y_1 Y_17) (<= Y_2 Y_17) (<= Y_3 Y_17) (<= Y_4 Y_17) (<= Y_5 Y_17) (<= Y_6 Y_17) (<= Y_7 Y_17))
+  (and (<= Y_1 Y_18) (<= Y_2 Y_18) (<= Y_3 Y_18) (<= Y_4 Y_18) (<= Y_5 Y_18) (<= Y_6 Y_18) (<= Y_7 Y_18))
+  (and (<= Y_1 Y_19) (<= Y_2 Y_19) (<= Y_3 Y_19) (<= Y_4 Y_19) (<= Y_5 Y_19) (<= Y_6 Y_19) (<= Y_7 Y_19))
+  (and (<= Y_1 Y_20) (<= Y_2 Y_20) (<= Y_3 Y_20) (<= Y_4 Y_20) (<= Y_5 Y_20) (<= Y_6 Y_20) (<= Y_7 Y_20))))
+(check-sat)
